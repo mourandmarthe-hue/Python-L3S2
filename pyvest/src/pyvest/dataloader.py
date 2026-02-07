@@ -4,13 +4,14 @@
 from pathlib import Path
 import logging
 import pickle
-from datetime import datetime
+from datetime import date, datetime
 from typing import Sequence
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
-from .priceseries import PriceSeries
+from pyvest.priceseries import PriceSeries
 
 class DataLoader:
     """
@@ -45,49 +46,50 @@ class DataLoader:
         
         Format: {ticker}_{price_col}_{start}_{end}.pkl
         """
-        return self.cache_dir / f"{ticker}_{price_col}_{dates[0]}_{dates[1]}.pkl"
-
+        file_name = f"{ticker}_{price_col}_{dates[0]}_{dates[1]}"
+        return self.cache_dir / file_name
+  
     def _check_date_overlap(
-        self,
-        cached_start: pd.Timestamp,
-        cached_end: pd.Timestamp,
-        req_start: pd.Timestamp,
-        req_end: pd.Timestamp
-    ) -> tuple[str, pd.Timestamp | None, pd.Timestamp | None]:
-        """
-        Détermine le type de chevauchement entre le cache et la requête
-        
-        Returns:
-            tuple: (status, gap_start, gap_end)
-            - status: "exact" | "contains" | "overlap_before" | "overlap_after" | "miss"
-            - gap_start: Début de la période manquante (si overlap)
-            - gap_end: Fin de la période manquante (si overlap)
-        """
-        # Cas MISS: Aucune intersection
-        if cached_end < req_start or cached_start > req_end:
+            self,
+            cached_start: pd.Timestamp,
+            cached_end: pd.Timestamp,
+            req_start: pd.Timestamp,
+            req_end: pd.Timestamp
+        ) -> tuple[str, pd.Timestamp | None, pd.Timestamp | None]:
+            """
+            Détermine le type de chevauchement entre le cache et la requête
+            
+            Returns:
+                tuple: (status, gap_start, gap_end)
+                - status: "exact" | "contains" | "overlap_before" | "overlap_after" | "miss"
+                - gap_start: Début de la période manquante (si overlap)
+                - gap_end: Fin de la période manquante (si overlap)
+            """
+            # Cas MISS: Aucune intersection
+            if cached_end < req_start or cached_start > req_end:
+                return ("miss", None, None)
+
+            # Cas exact: hit parfait du cache
+            if cached_start == req_start and cached_end == req_end:
+                return ("exact", None, None)
+
+            # Cas CONTAINS: hit du cache qui contient complétement la requête
+            if cached_start <= req_start and cached_end >= req_end:
+                return ("contains", None, None)
+
+            # Cas OVERLAP_AFTER: cache hit mais la requête débordre à droite
+            if cached_start <= req_start and cached_end < req_end:
+                gap_start = cached_end + pd.Timedelta(days=1)
+                gap_end = req_end
+                return ("overlap_after", gap_start, gap_end)
+
+            # Cas OVERLAP_BEFORE: cache hit mais la requête déborde à gauche
+            if cached_start > req_start and cached_end >= req_end:
+                gap_start = req_start
+                gap_end = cached_start - pd.Timedelta(days=1)
+                return ("overlap_before", gap_start, gap_end)
+            
             return ("miss", None, None)
-
-        # Cas exact: hit parfait du cache
-        if cached_start == req_start and cached_end == req_end:
-            return ("exact", None, None)
-
-        # Cas CONTAINS: hit du cache qui contient complétement la requête
-        if cached_start <= req_start and cached_end >= req_end:
-            return ("contains", None, None)
-
-        # Cas OVERLAP_AFTER: cache hit mais la requête débordre à droite
-        if cached_start <= req_start and cached_end < req_end:
-            gap_start = cached_end + pd.Timedelta(days=1)
-            gap_end = req_end
-            return ("overlap_after", gap_start, gap_end)
-
-        # Cas OVERLAP_BEFORE: cache hit mais la requête déborde à gauche
-        if cached_start > req_start and cached_end >= req_end:
-            gap_start = req_start
-            gap_end = cached_start - pd.Timedelta(days=1)
-            return ("overlap_before", gap_start, gap_end)
-        
-        return ("miss", None, None)
 
     def _load_from_cache(
         self,
@@ -187,6 +189,7 @@ class DataLoader:
         self, 
         cache_path: Path, 
         prices: list[float],
+        price_col: str,
         dates: list,
         ticker: str, 
         start: str, 
@@ -202,80 +205,77 @@ class DataLoader:
             "fetched_at": datetime.now().isoformat(),
             "n_prices": len(prices),
             "prices": prices,
-            "dates": dates
+            "dates": dates,
+            "price_col": price_col
         }
-        with open(cache_path, 'wb') as f:
+        with open(cache_path, 'wb') as f: #gestionnaire de contexte pour s'assurer que le fichier est fermé correctement
             pickle.dump(data, f)
         self.logger.debug(f"Cache sauvegardé: {cache_path}")
-    
+
     def fetch_single_ticker(
         self, 
         ticker: str, 
         price_col: str, 
         dates: tuple[str, str]
     ) -> PriceSeries | None:
-        """
-        Récupère les données de prix d'un ticker unique avec système de cache.
-        Args:
-            ticker: Symbole (ex: 'AAPL')
-            price_col: Nom de la colonne prix (ex: 'Close', 'Open')
-            dates: (start_date, end_date) au format 'YYYY-MM-DD'
+        start_date = pd.Timestamp(dates[0])
+        end_date = pd.Timestamp(dates[1])
+        ticker_instance = yf.Ticker(ticker)
+        df = ticker_instance.history(start=start_date, end=end_date)
+
+        if df.empty: 
+            print("Dataframe vide pour {ticker}")
+            return None
         
-        Returns:
-            Instance de PriceSeries ou None si échec
-        """
-        # Conversion des dates en Timestamp
+        if price_col not in df.columns:
+            print(f"{price_col} n'est pas dans le Dataframe du ticker {ticker}")
+            raise KeyError(f"{price_col} n'est pas dans le Dataframe du ticker {ticker}")
+        
+        prices = df.loc[:, price_col]
+        dates_list = df.index.to_list()
 
-        # Vérifier le cache
-
-            # Fetch la partie manquante
-
-            # Fusionner le cache avec les nouvelles données
-
-                # Concaténation à droite
-
-                # Ou concaténation à gauche
-
-            # Supprimer les doublons et trier par date
-
-            # Sauvegarder le cache étendu
-
-            # Retourner l'objet price series
-
-        # else:  # miss: pas de données en cache
-            # fetch toutes les données avec yfinance
-
-            # Sauvegarder dans le cache
-
-            # renvoyer PriceSeries avec la série de prix
-        pass
+        if prices.empty:
+            print(f"colonne {price_col} est vide pour le ticker {ticker}")
+            return None
+        
+        return PriceSeries(values=prices, name=price_col)
     
-    def fetch_multiple_tickers(
-        self,
-        tickers: Sequence[str],
-        price_col: str,
-        dates: tuple[str, str]
-    ) -> dict[str, PriceSeries]:
-        """
-        Récupère les données de prix pour plusieurs tickers.
+
+
+
+if __name__ == "__main__":
+    dataloader = DataLoader()
+    result = dataloader.fetch_single_ticker("AAPL", "Close", ("2024-01-01", "2024-01-10"))
+    print(result)
+    pass
+
+
+    # def fetch_multiple_tickers(
+    #     self,
+    #     tickers: Sequence[str],
+    #     price_col: str,
+    #     dates: tuple[str, str]
+    # ) -> dict[str, PriceSeries]:
+    #     """
+    #     Récupère les données de prix pour plusieurs tickers.
         
-        Returns:
-            Dictionnaire {ticker: PriceSeries}
-        """
-        results = {}
-        for ticker in tickers:
-            ps = self.fetch_single_ticker(ticker, price_col, dates)
-            if ps is not None:
-                results[ticker] = ps
-        return results
+    #     Returns:
+    #         Dictionnaire {ticker: PriceSeries}
+    #     """
+    #     results = {}
+    #     for ticker in tickers:
+    #         ps = self.fetch_single_ticker(ticker, price_col, dates)
+    #         if ps is not None:
+    #             results[ticker] = ps
+    #     return results
     
-    def clear_cache(self) -> int:
-        """
-        Supprime tous les fichiers du cache.
+    # def clear_cache(self) -> int:
+    #     """
+    #     Supprime tous les fichiers du cache.
         
-        Returns:
-            Nombre de fichiers supprimés
-        """
-        # Itérer sur les fichiers d'un directory tout en vérifiant le suffix
-            # supprimer
-        # Renvoyer le nombre de fichier supprimé
+    #     Returns:
+    #         Nombre de fichiers supprimés
+    #     """
+    #     # Itérer sur les fichiers d'un directory tout en vérifiant le suffix
+    #         # supprimer
+    #     # Renvoyer le nombre de fichier supprimé
